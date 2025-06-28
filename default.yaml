@@ -27,4 +27,4 @@ optimizer:
 resume_from_checkpoint: null
 save_dir: checkpoints
 training:
-  epochs: 100
+  epochs: 50
