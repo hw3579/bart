@@ -124,9 +124,9 @@ class Trainer:
         model_config = self.config.get('model', {})
         
         # 减小模型大小以节省内存
-        if model_config.get('d_model', 512) > 512:
-            model_config['d_model'] = 512
-            print("Warning: Reduced model dimension to 512 to save memory")
+        # if model_config.get('d_model', 512) > 512:
+        #     model_config['d_model'] = 512
+        #     print("Warning: Reduced model dimension to 512 to save memory")
         
         self.model, self.criterion = create_model(model_config)
         self.model.to(self.device)
