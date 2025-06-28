@@ -145,6 +145,26 @@ class Trainer:
         """设置模型"""
         model_config = self.config.get('model', {})
         
+        # 根据配置选择模型类型
+        use_flash_attention = model_config.get('use_flash_attention', False)
+        
+        if use_flash_attention:
+            try:
+                # 导入Flash Attention版本
+                from bartmodel_flash_attn import create_model
+                if self.local_rank == 0:
+                    print("Loading Flash Attention BART model...")
+            except ImportError as e:
+                # 如果Flash Attention不可用，回退到标准模型
+                if self.local_rank == 0:
+                    print(f"Flash Attention not available ({e}), using standard BART model...")
+                from bartmodel import create_model
+        else:
+            # 使用标准模型
+            from bartmodel import create_model
+            if self.local_rank == 0:
+                print("Loading standard BART model...")
+        
         self.model, self.criterion = create_model(model_config)
         self.model.to(self.device)
         
@@ -158,8 +178,7 @@ class Trainer:
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
                 find_unused_parameters=True,
-                broadcast_buffers=False       # 可选：禁用buffer广播来提高性能
-
+                broadcast_buffers=False
             )
         
         # 如果有预训练模型，加载它
@@ -623,21 +642,22 @@ def create_default_config():
     return {
         'data': {
             'data_path': 'processed_ETH_USDT_data.feather',
-            'batch_size': 16,  # 减小batch size
-            'sequence_length': 200,
+            'batch_size': 32,
+            'sequence_length': 100,
             'prediction_length': 5,
             'train_ratio': 0.8,
-            'num_workers': 2  # 减少工作进程数
+            'num_workers': 4
         },
         'model': {
             'input_dim': 4,
-            'sequence_length': 200,
+            'sequence_length': 100,
             'prediction_length': 5,
-            'd_model': 256,  # 减小模型维度
-            'num_encoder_layers': 4,  # 减少层数
-            'num_decoder_layers': 4,
+            'd_model': 512,
+            'num_encoder_layers': 6,
+            'num_decoder_layers': 6,
             'nhead': 8,
-            'dropout': 0.1
+            'dropout': 0.1,
+            'use_flash_attention': False  # 默认不使用Flash Attention
         },
         'optimizer': {
             'lr': 0.0001,
@@ -646,7 +666,8 @@ def create_default_config():
             'scheduler': 'plateau'
         },
         'training': {
-            'epochs': 100
+            'epochs': 50,
+            'mixed_precision': False
         },
         'distributed': {
             'use_distributed': False,

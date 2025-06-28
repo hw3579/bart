@@ -20,6 +20,8 @@ model:
   num_encoder_layers: 6
   prediction_length: 5
   sequence_length: 100
+  use_flash_attention: true          # 新增：启用Flash Attention
+  attn_implementation: "flash_attention_2"  
 
 optimizer:
   betas: [0.9, 0.999]
