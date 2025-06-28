@@ -1,0 +1,10 @@
+/__pycache__
+/checkpoint
+/checkpoints_2gpu
+*.pyc
+
+#log pkl
+*.log
+*.pkl
+
+/data
