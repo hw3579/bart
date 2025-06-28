@@ -31,13 +31,13 @@ def preprocess_data(df):
     # 使用close价格计算
     processed_df['label'] = np.nan
     
-    for i in tqdm(range(len(df) - 5), desc="Processing labels"):
-        # 计算后面5根蜡烛的平均close价格
-        future_5_avg = df['close'].iloc[i+1:i+6].mean()
+    for i in tqdm(range(len(df) - 1), desc="Processing labels"):
+        # 计算当前蜡烛对于往前第1个的变化
+        five_close = df['close'].iloc[i+1]
         current_close = df['close'].iloc[i]
         
         # 计算涨跌幅度 (未来5根平均价格 / 当前价格) * 100
-        processed_df.loc[i, 'label'] = ((future_5_avg - current_close) / current_close) * 100
+        processed_df.loc[i, 'label'] = ((five_close - current_close) / current_close) * 100
 
     # 移除最后5行（因为没有足够的未来数据计算label）
     processed_df = processed_df.dropna()
@@ -50,8 +50,8 @@ processed_data = preprocess_data(df)
 # 查看结果
 print("原始数据形状:", df.shape)
 print("预处理后数据形状:", processed_data.shape)
-print("\n预处理后数据前5行:")
-print(processed_data.head())
+print("\n预处理后数据前20行:")
+print(processed_data.head(20))
 
 print("\n数据统计信息:")
 print(processed_data.describe())

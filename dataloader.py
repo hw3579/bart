@@ -23,7 +23,7 @@ class TimeSeriesDataset(Dataset):
         
         # 特征列和标签列
         self.feature_columns = feature_columns
-        self.label_column = 'label'
+        self.label_column = 'label'  # 使用后5根蜡烛收盘价作为标签
         
         # 数据标准化
         self.scaler_features = StandardScaler()

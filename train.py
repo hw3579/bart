@@ -19,7 +19,7 @@ from typing import Optional  # 新增
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-
+import json
 
 # Ray imports for distributed training
 try:
@@ -33,7 +33,6 @@ except ImportError:
     RAY_AVAILABLE = False
     print("Ray not available. Training without distribution.")
 
-from dataloader import create_dataloaders
 from bartmodel import create_model, BARTTimeSeriesModel, BARTLoss
 
 def check_memory():
@@ -100,17 +99,21 @@ class Trainer:
             self._setup_logging()
             self._setup_save_dir()
         
-        # 初始化模型和数据
-        self._setup_model()
-        self._setup_data()
-        self._setup_optimizer()
-        
-        # 训练状态
+        # 训练状态 - 先初始化这些，以便加载检查点时使用
         self.current_epoch = 0
         self.current_step = 0
         self.best_val_loss = float('inf')
         self.train_losses = []
         self.val_losses = []
+        
+        # 初始化模型、数据和优化器
+        self._setup_model()
+        self._setup_data()
+        self._setup_optimizer()
+        
+        # 加载检查点（如果需要） - 移到最后
+        if self.config.get('resume_from_checkpoint'):
+            self._load_checkpoint(self.config['resume_from_checkpoint'])
         
         if self.local_rank == 0:
             self.logger.info(f"Training on device: {self.device}")
@@ -181,14 +184,13 @@ class Trainer:
                 broadcast_buffers=False
             )
         
-        # 如果有预训练模型，加载它
-        if self.config.get('resume_from_checkpoint'):
-            self._load_checkpoint(self.config['resume_from_checkpoint'])
     
     def _setup_data(self):
         """设置数据加载器"""
         data_config = self.config.get('data', {})
-        
+        model_config = self.config.get('model', {})  # 添加这行
+
+            
         # 为分布式训练调整batch size
         batch_size = data_config.get('batch_size', 32)
         
@@ -209,7 +211,7 @@ class Trainer:
         from dataloader import create_dataloaders
         
         # 获取数据路径
-        data_path = data_config.get('data_path', 'processed_ETH_USDT_data.feather')
+        data_path = data_config.get('data_path', 'processed_ETH_USDT_data.feather')        
         
         # 创建数据加载器（不使用分布式，我们后面会重新包装）
         train_loader_temp, val_loader_temp, self.dataset = create_dataloaders(
@@ -219,7 +221,7 @@ class Trainer:
             prediction_length=data_config.get('prediction_length', 5),
             train_ratio=data_config.get('train_ratio', 0.8),
             num_workers=0,  # 先设为0，后面重新创建
-            feature_columns=data_config.get('feature_columns', ['open', 'delta', 'close', 'volume'])
+            feature_columns=model_config.get('feature_columns', ['open', 'delta', 'close', 'volume'])
 
         )
         
@@ -622,6 +624,25 @@ class Trainer:
         plt.tight_layout()
         plt.savefig(os.path.join(self.save_dir, 'loss_curves.png'), dpi=300)
         plt.close()
+
+    def _save_training_history(self):
+        """保存训练历史"""
+        if self.local_rank == 0:  # 修改这里，使用 local_rank 而不是 is_main_process
+            history = {
+                'train_losses': self.train_losses,
+                'val_losses': self.val_losses,
+                'best_val_loss': self.best_val_loss,
+                'epochs_completed': len(self.train_losses)
+            }
+            
+            history_path = os.path.join(self.save_dir, 'training_history.json')
+            with open(history_path, 'w') as f:
+                json.dump(history, f, indent=2)
+            
+            self.logger.info(f"Training history saved to {history_path}")
+            
+            # 同时绘制损失曲线
+            self._plot_losses()
 
 def train_func(config):
     """Ray分布式训练函数"""

@@ -7,4 +7,4 @@ feather_file = 'OHLCVD_ETH_USDT_data.feather'
 df = pd.read_feather(feather_file)
 
 # 显示前几行
-print(df.head())
+print(df.head(20))

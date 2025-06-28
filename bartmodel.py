@@ -223,10 +223,14 @@ def create_model(config=None):
             'num_encoder_layers': 6,
             'num_decoder_layers': 6,
             'nhead': 8,
-            'dropout': 0.1
+            'dropout': 0.1,
+            'feature_columns': ['open', 'high', 'low', 'close', 'volume', 'delta']
         }
     
-    model = BARTTimeSeriesModel(**config)
+    config_temp = config.copy()
+    if 'feature_columns' in config:
+        config_temp.pop('feature_columns')  # 移除特征列配置
+    model = BARTTimeSeriesModel(**config_temp)
     criterion = BARTLoss(loss_type='combined', alpha=0.7)
     
     return model, criterion
