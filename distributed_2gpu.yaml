@@ -1,13 +1,16 @@
 data:
-  batch_size: 32
+  batch_size: 64                     # 每个GPU分到32
   data_path: processed_ETH_USDT_data.feather
   num_workers: 0
   prediction_length: 5
   sequence_length: 100
   train_ratio: 0.8
+
 distributed:
-  num_workers: 1
-  use_distributed: false
+  use_distributed: true
+  num_workers: 2
+  backend: nccl
+
 model:
   d_model: 768
   dropout: 0.1
@@ -17,14 +20,16 @@ model:
   num_encoder_layers: 6
   prediction_length: 5
   sequence_length: 100
+
 optimizer:
-  betas:
-  - 0.9
-  - 0.999
-  lr: 0.0001
+  betas: [0.9, 0.999]
+  lr: 0.0002                         # base_lr * 2
   scheduler: plateau
   weight_decay: 0.01
-resume_from_checkpoint: null
-save_dir: checkpoints
+
 training:
   epochs: 50
+  mixed_precision: true
+
+resume_from_checkpoint: null
+save_dir: checkpoints_2gpu

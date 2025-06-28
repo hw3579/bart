@@ -16,6 +16,10 @@ import psutil
 import tyro
 from dataclasses import dataclass  # 新增
 from typing import Optional  # 新增
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+
 
 # Ray imports for distributed training
 try:
@@ -57,15 +61,30 @@ class Trainer:
         self.config = config
         self.use_ray = use_ray
         
-        # 设置设备
+        # 设置分布式训练环境
         if use_ray and RAY_AVAILABLE:
             self.device = ray_torch.get_device()
             self.local_rank = train.get_context().get_local_rank()
             self.world_size = train.get_context().get_world_size()
+            self.is_distributed = True
+        elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+            # PyTorch原生分布式
+            self.local_rank = int(os.environ['LOCAL_RANK'])
+            self.world_size = int(os.environ['WORLD_SIZE'])
+            self.rank = int(os.environ['RANK'])
+            
+            # 初始化分布式
+            dist.init_process_group(backend='nccl')
+            torch.cuda.set_device(self.local_rank)
+            self.device = torch.device(f'cuda:{self.local_rank}')
+            self.is_distributed = True
         else:
+            # 单机训练
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             self.local_rank = 0
             self.world_size = 1
+            self.rank = 0
+            self.is_distributed = False
         
         # 检查内存
         if self.local_rank == 0:
@@ -126,17 +145,20 @@ class Trainer:
         """设置模型"""
         model_config = self.config.get('model', {})
         
-        # 减小模型大小以节省内存
-        # if model_config.get('d_model', 512) > 512:
-        #     model_config['d_model'] = 512
-        #     print("Warning: Reduced model dimension to 512 to save memory")
-        
         self.model, self.criterion = create_model(model_config)
         self.model.to(self.device)
         
         # 分布式训练包装
         if self.use_ray and RAY_AVAILABLE:
             self.model = ray_torch.prepare_model(self.model)
+        elif self.is_distributed and not self.use_ray:
+            # PyTorch原生DDP
+            self.model = DDP(
+                self.model, 
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+                find_unused_parameters=False
+            )
         
         # 如果有预训练模型，加载它
         if self.config.get('resume_from_checkpoint'):
@@ -151,36 +173,95 @@ class Trainer:
         
         # 根据可用内存调整batch size
         memory_info = check_memory()
-        if memory_info['available_memory'] < 8:  # 小于8GB内存
+        if memory_info['available_memory'] < 8:
             batch_size = min(batch_size, 16)
             print(f"Warning: Reduced batch size to {batch_size} due to low memory")
         
-        if self.use_ray and self.world_size > 1:
+        # 分布式训练时平分batch size
+        if self.is_distributed:
             batch_size = batch_size // self.world_size
         
         # 减少数据加载器的工作进程数
         num_workers = min(data_config.get('num_workers', 4), 2)
         
-        self.train_loader, self.val_loader, self.dataset = create_dataloaders(
-            data_path=data_config.get('data_path', 'processed_ETH_USDT_data.feather'),
-            batch_size=batch_size,
+        # 创建数据集
+        from dataloader import TimeSeriesDataset
+        import pandas as pd
+        
+        # 加载数据
+        data_path = data_config.get('data_path', 'processed_ETH_USDT_data.feather')
+        data = pd.read_feather(data_path)
+        
+        # 创建数据集
+        dataset = TimeSeriesDataset(
+            data=data,
             sequence_length=data_config.get('sequence_length', 200),
-            prediction_length=data_config.get('prediction_length', 5),
-            train_ratio=data_config.get('train_ratio', 0.8),
-            num_workers=num_workers
+            prediction_length=data_config.get('prediction_length', 5)
         )
         
-        # 分布式训练包装
+        # 分割训练和验证集
+        train_ratio = data_config.get('train_ratio', 0.8)
+        train_size = int(len(dataset) * train_ratio)
+        val_size = len(dataset) - train_size
+        
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            dataset, [train_size, val_size]
+        )
+        
+        # 创建分布式采样器
+        if self.is_distributed and not self.use_ray:
+            train_sampler = DistributedSampler(
+                train_dataset, 
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=True
+            )
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=False
+            )
+        else:
+            train_sampler = None
+            val_sampler = None
+        
+        # 创建数据加载器
+        self.train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            shuffle=(train_sampler is None),
+            num_workers=num_workers,
+            pin_memory=True
+        )
+        
+        self.val_loader = torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            sampler=val_sampler,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+        
+        # Ray分布式包装
         if self.use_ray and RAY_AVAILABLE:
             self.train_loader = ray_torch.prepare_data_loader(self.train_loader)
             self.val_loader = ray_torch.prepare_data_loader(self.val_loader)
+        
+        # 保存数据集和采样器
+        self.dataset = dataset
+        self.train_sampler = train_sampler
+        self.val_sampler = val_sampler
         
         # 只在主进程保存标准化器
         if self.local_rank == 0:
             scaler_path = os.path.join(self.save_dir, 'scalers')
             self.dataset.save_scalers(scaler_path)
             self.logger.info(f"Scalers saved to {scaler_path}")
-    
+
+
     def _setup_optimizer(self):
         """设置优化器和调度器"""
         optimizer_config = self.config.get('optimizer', {})
@@ -224,6 +305,11 @@ class Trainer:
     def train_epoch(self):
         """训练一个epoch"""
         self.model.train()
+        
+        # 设置分布式采样器的epoch
+        if self.train_sampler is not None:
+            self.train_sampler.set_epoch(self.current_epoch)
+        
         total_loss = 0
         num_batches = len(self.train_loader)
         
@@ -265,7 +351,6 @@ class Trainer:
                 if batch_idx % 100 == 0:
                     torch.cuda.empty_cache() if torch.cuda.is_available() else None
                     gc.collect()
-                
                     
             except RuntimeError as e:
                 if "out of memory" in str(e):
@@ -279,8 +364,14 @@ class Trainer:
         
         # 聚合分布式训练的损失
         avg_loss = total_loss / num_batches
-        if self.use_ray and self.world_size > 1:
-            # 使用Ray的通信原语聚合损失
+        
+        if self.is_distributed and not self.use_ray:
+            # PyTorch原生分布式损失聚合
+            loss_tensor = torch.tensor(avg_loss, device=self.device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            avg_loss = loss_tensor.item() / self.world_size
+        elif self.use_ray and self.world_size > 1:
+            # Ray分布式损失聚合
             avg_loss = ray_torch.all_reduce(torch.tensor(avg_loss)).item() / self.world_size
         
         self.train_losses.append(avg_loss)
@@ -606,117 +697,122 @@ def main():
     # 设置环境变量避免TensorFlow相关警告
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     
+    try:
+        # 使用tyro解析参数
+        args = tyro.cli(TrainingArgs, description="BART Time Series Training")
 
-    # 使用tyro解析参数
-    args = tyro.cli(TrainingArgs, description="BART Time Series Training")
-    
-    # 创建默认配置文件
-    if args.create_config:
-        default_config = create_default_config()
-        save_config(default_config, args.config)
-        print(f"默认配置文件已创建: {args.config}")
-        return
-    
-    # 加载配置
-    if os.path.exists(args.config):
-        config = load_config(args.config)
-        print(f"配置文件已加载: {args.config}")
-    else:
-        print(f"配置文件不存在: {args.config}")
-        print("创建默认配置文件...")
-        config = create_default_config()
-        save_config(config, args.config)
-        print(f"默认配置文件已创建: {args.config}")
-    
-    save_dir = config.get('save_dir', 'checkpoints')
-    
-    # 列出检查点
-    if args.list_checkpoints:
-        checkpoints = list_checkpoints(save_dir)
-        if checkpoints:
-            print("\n可用的检查点:")
-            print("-" * 80)
-            print(f"{'文件名':<25} {'Epoch':<8} {'Step':<10} {'最佳验证损失':<15} {'修改时间'}")
-            print("-" * 80)
-            for cp in checkpoints:
-                from datetime import datetime
-                mod_time = datetime.fromtimestamp(cp['modified_time']).strftime('%Y-%m-%d %H:%M:%S')
-                print(f"{cp['filename']:<25} {str(cp['epoch']):<8} {str(cp['step']):<10} {str(cp['best_val_loss']):<15} {mod_time}")
-        else:
-            print("没有找到检查点文件")
-        return
-    
-    # 处理resume参数
-    resume_path = None
-    if args.resume:
-        if os.path.exists(args.resume):
-            resume_path = args.resume
-        else:
-            print(f"错误: 检查点文件不存在: {args.resume}")
+        # 创建默认配置文件
+        if args.create_config:
+            default_config = create_default_config()
+            save_config(default_config, args.config)
+            print(f"默认配置文件已创建: {args.config}")
             return
-    elif args.resume_best:
-        best_model_path = os.path.join(save_dir, 'models', 'best_model.pth')
-        if os.path.exists(best_model_path):
-            resume_path = best_model_path
-        else:
-            print("错误: 未找到最佳模型检查点")
-            return
-    elif args.resume_latest:
-        checkpoints = list_checkpoints(save_dir)
-        if checkpoints:
-            resume_path = checkpoints[0]['path']  # 最新的检查点
-        else:
-            print("错误: 未找到任何检查点")
-            return
-    
-    if resume_path:
-        config['resume_from_checkpoint'] = resume_path
-        print(f"将从检查点恢复训练: {resume_path}")
-    
-    # 保存当前使用的配置到输出目录
-    os.makedirs(save_dir, exist_ok=True)
-    save_config(config, os.path.join(save_dir, 'config_used.yaml'))
-    
-    # 分布式训练配置
-    distributed_config = config.get('distributed', {})
-    use_distributed = distributed_config.get('use_distributed', False)
-    num_workers = distributed_config.get('num_workers', 1)
-    
-    if use_distributed and RAY_AVAILABLE:
-        # 初始化Ray
-        ray.init()
         
-        # 配置分布式训练
-        scaling_config = ScalingConfig(
-            num_workers=num_workers,
-            use_gpu=True,
-            resources_per_worker={"CPU": 2, "GPU": 1}
-        )
+        # 加载配置
+        if os.path.exists(args.config):
+            config = load_config(args.config)
+            print(f"配置文件已加载: {args.config}")
+        else:
+            print(f"配置文件不存在: {args.config}")
+            print("创建默认配置文件...")
+            config = create_default_config()
+            save_config(config, args.config)
+            print(f"默认配置文件已创建: {args.config}")
         
-        # 创建TorchTrainer
-        trainer = TorchTrainer(
-            train_func,
-            train_loop_config=config,
-            scaling_config=scaling_config,
-            run_config=train.RunConfig(
-                name="bart_timeseries_distributed",
-                storage_path="./ray_results",
-                checkpoint_config=train.CheckpointConfig(
-                    num_to_keep=5,
-                    checkpoint_score_attribute="val_loss",
-                    checkpoint_score_order="min",
+        save_dir = config.get('save_dir', 'checkpoints')
+        
+        # 列出检查点
+        if args.list_checkpoints:
+            checkpoints = list_checkpoints(save_dir)
+            if checkpoints:
+                print("\n可用的检查点:")
+                print("-" * 80)
+                print(f"{'文件名':<25} {'Epoch':<8} {'Step':<10} {'最佳验证损失':<15} {'修改时间'}")
+                print("-" * 80)
+                for cp in checkpoints:
+                    from datetime import datetime
+                    mod_time = datetime.fromtimestamp(cp['modified_time']).strftime('%Y-%m-%d %H:%M:%S')
+                    print(f"{cp['filename']:<25} {str(cp['epoch']):<8} {str(cp['step']):<10} {str(cp['best_val_loss']):<15} {mod_time}")
+            else:
+                print("没有找到检查点文件")
+            return
+        
+        # 处理resume参数
+        resume_path = None
+        if args.resume:
+            if os.path.exists(args.resume):
+                resume_path = args.resume
+            else:
+                print(f"错误: 检查点文件不存在: {args.resume}")
+                return
+        elif args.resume_best:
+            best_model_path = os.path.join(save_dir, 'models', 'best_model.pth')
+            if os.path.exists(best_model_path):
+                resume_path = best_model_path
+            else:
+                print("错误: 未找到最佳模型检查点")
+                return
+        elif args.resume_latest:
+            checkpoints = list_checkpoints(save_dir)
+            if checkpoints:
+                resume_path = checkpoints[0]['path']  # 最新的检查点
+            else:
+                print("错误: 未找到任何检查点")
+                return
+        
+        if resume_path:
+            config['resume_from_checkpoint'] = resume_path
+            print(f"将从检查点恢复训练: {resume_path}")
+        
+        # 保存当前使用的配置到输出目录
+        os.makedirs(save_dir, exist_ok=True)
+        save_config(config, os.path.join(save_dir, 'config_used.yaml'))
+        
+        # 分布式训练配置
+        distributed_config = config.get('distributed', {})
+        use_distributed = distributed_config.get('use_distributed', False)
+        num_workers = distributed_config.get('num_workers', 1)
+        
+        if use_distributed and RAY_AVAILABLE:
+            # 初始化Ray
+            ray.init()
+            
+            # 配置分布式训练
+            scaling_config = ScalingConfig(
+                num_workers=num_workers,
+                use_gpu=True,
+                resources_per_worker={"CPU": 2, "GPU": 1}
+            )
+            
+            # 创建TorchTrainer
+            trainer = TorchTrainer(
+                train_func,
+                train_loop_config=config,
+                scaling_config=scaling_config,
+                run_config=train.RunConfig(
+                    name="bart_timeseries_distributed",
+                    storage_path="./ray_results",
+                    checkpoint_config=train.CheckpointConfig(
+                        num_to_keep=5,
+                        checkpoint_score_attribute="val_loss",
+                        checkpoint_score_order="min",
+                    )
                 )
             )
-        )
-        
-        # 开始训练
-        result = trainer.fit()
-        print(f"Training completed. Best checkpoint: {result.checkpoint}")
-        
-    else:
-        # 单机训练
-        trainer = Trainer(config, use_ray=False)
-        trainer.train()
+            
+            # 开始训练
+            result = trainer.fit()
+            print(f"Training completed. Best checkpoint: {result.checkpoint}")
+            
+        else:
+            # 单机训练
+            trainer = Trainer(config, use_ray=False)
+            trainer.train()
+
+    finally:
+        # 清理分布式进程组
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()

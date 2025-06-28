@@ -1,2 +1,6 @@
 /__pycache__
 /checkpoint
+
+#log pkl
+*.log
+*.pkl
