@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 import pickle
 
 class TimeSeriesDataset(Dataset):
-    def __init__(self, data_path, sequence_length=200, prediction_length=5, train=True, train_ratio=0.8):
+    def __init__(self, data_path, sequence_length=200, prediction_length=5, train=True, train_ratio=0.8, feature_columns=['open', 'delta', 'close', 'volume']):
         """
         Args:
             data_path: 预处理后的数据文件路径
@@ -22,7 +22,7 @@ class TimeSeriesDataset(Dataset):
         self.data = pd.read_feather(data_path)
         
         # 特征列和标签列
-        self.feature_columns = ['open', 'delta', 'close', 'volume']
+        self.feature_columns = feature_columns
         self.label_column = 'label'
         
         # 数据标准化
@@ -106,7 +106,7 @@ class TimeSeriesDataset(Dataset):
         with open(f"{path_prefix}_label_scaler.pkl", 'rb') as f:
             self.scaler_labels = pickle.load(f)
 
-def create_dataloaders(data_path, batch_size=32, sequence_length=200, prediction_length=5, train_ratio=0.8, num_workers=4):
+def create_dataloaders(data_path, batch_size=32, sequence_length=200, prediction_length=5, train_ratio=0.8, num_workers=4, feature_columns=['open', 'delta', 'close', 'volume']):
     """
     创建训练和验证数据加载器
     
@@ -127,7 +127,8 @@ def create_dataloaders(data_path, batch_size=32, sequence_length=200, prediction
         sequence_length=sequence_length,
         prediction_length=prediction_length,
         train=True,
-        train_ratio=train_ratio
+        train_ratio=train_ratio,
+        feature_columns=feature_columns
     )
     
     # 创建验证集
@@ -136,7 +137,8 @@ def create_dataloaders(data_path, batch_size=32, sequence_length=200, prediction
         sequence_length=sequence_length,
         prediction_length=prediction_length,
         train=False,
-        train_ratio=train_ratio
+        train_ratio=train_ratio,
+        feature_columns=feature_columns 
     )
     
     # 创建数据加载器

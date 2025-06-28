@@ -218,7 +218,9 @@ class Trainer:
             sequence_length=data_config.get('sequence_length', 200),
             prediction_length=data_config.get('prediction_length', 5),
             train_ratio=data_config.get('train_ratio', 0.8),
-            num_workers=0  # 先设为0，后面重新创建
+            num_workers=0,  # 先设为0，后面重新创建
+            feature_columns=data_config.get('feature_columns', ['open', 'delta', 'close', 'volume'])
+
         )
         
         # 获取数据集用于分布式包装

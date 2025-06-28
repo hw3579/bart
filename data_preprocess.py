@@ -14,14 +14,18 @@ def preprocess_data(df):
     # open 保持不变
     processed_df['open'] = df['open']
     
-    # delta = high - low
-    processed_df['delta'] = df['high'] - df['low']
+    # 保留 high 和 low
+    processed_df['high'] = df['high']
+    processed_df['low'] = df['low']
     
     # close 保持不变
     processed_df['close'] = df['close']
     
     # volume 保持不变
     processed_df['volume'] = df['volume']
+
+    # delta = high - low
+    processed_df['delta'] = (df['high'] - df['low'])/ df['open'] * 100 # 计算波动率，单位为百分比
     
     # 计算label：后面5根蜡烛的平均值除以当前蜡烛乘100
     # 使用close价格计算
@@ -53,6 +57,6 @@ print("\n数据统计信息:")
 print(processed_data.describe())
 
 # 保存预处理后的数据
-processed_data.to_feather("processed_ETH_USDT_data.feather")
-print("\n预处理后的数据已保存到: processed_ETH_USDT_data.feather")
+processed_data.to_feather("OHLCVD_ETH_USDT_data.feather")
+print("\n预处理后的数据已保存到: OHLCVD_ETH_USDT_data.feather")
 
