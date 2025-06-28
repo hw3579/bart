@@ -1,5 +1,5 @@
 data:
-  batch_size: 64                     # 每个GPU分到32
+  batch_size: 128                     # 每个GPU分到32
   data_path: processed_ETH_USDT_data.feather
   num_workers: 0
   prediction_length: 5
@@ -20,8 +20,7 @@ model:
   num_encoder_layers: 6
   prediction_length: 5
   sequence_length: 100
-  use_flash_attention: true          # 新增：启用Flash Attention
-  attn_implementation: "flash_attention_2"  
+  use_flash_attention: false          # 新增：启用Flash Attention
 
 optimizer:
   betas: [0.9, 0.999]

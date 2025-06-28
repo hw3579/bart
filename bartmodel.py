@@ -12,7 +12,8 @@ class BARTTimeSeriesModel(nn.Module):
                  num_encoder_layers=6,
                  num_decoder_layers=6,
                  nhead=12,
-                 dropout=0.1):
+                 dropout=0.1,
+                 use_flash_attention=False):
         """
         基于BART的时序预测模型
         

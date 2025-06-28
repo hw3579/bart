@@ -13,7 +13,7 @@ torchrun \
     --standalone \
     --nproc_per_node=$NUM_GPUS \
     train.py \
-    --config distributed_config.yaml
+    --config distributed_2gpu.yaml
 
 # 或者使用特定配置
 # torchrun --standalone --nproc_per_node=2 train.py --config distributed_2gpu.yaml
