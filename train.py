@@ -263,10 +263,6 @@ class Trainer:
                     torch.cuda.empty_cache() if torch.cuda.is_available() else None
                     gc.collect()
                 
-                # 每1000步保存检查点（只在主进程）
-                if self.current_step % 1000 == 0 and self.local_rank == 0:
-                    self._save_checkpoint(f'step_{self.current_step}')
-                    self.logger.info(f"Checkpoint saved at step {self.current_step}")
                     
             except RuntimeError as e:
                 if "out of memory" in str(e):
@@ -365,7 +361,7 @@ class Trainer:
                     self.logger.info(f"New best model saved with val_loss={val_loss:.4f}")
                 
                 # 每5个epoch保存检查点
-                if (epoch + 1) % 5 == 0:
+                if (epoch + 1) % 10 == 0:
                     self._save_checkpoint(f'epoch_{epoch}')
             
             # Ray Train报告进度
