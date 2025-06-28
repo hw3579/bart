@@ -1,22 +1,22 @@
 data:
-  batch_size: 4
+  batch_size: 32
   data_path: processed_ETH_USDT_data.feather
-  num_workers: 0
+  num_workers: 8
   prediction_length: 5
-  sequence_length: 50
+  sequence_length: 100
   train_ratio: 0.8
 distributed:
   num_workers: 1
   use_distributed: false
 model:
-  d_model: 256
+  d_model: 1024
   dropout: 0.1
   input_dim: 4
-  nhead: 8
-  num_decoder_layers: 4
-  num_encoder_layers: 4
+  nhead: 16
+  num_decoder_layers: 12
+  num_encoder_layers: 12
   prediction_length: 5
-  sequence_length: 50
+  sequence_length: 100
 optimizer:
   betas:
   - 0.9
