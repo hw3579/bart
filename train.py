@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 import yaml
 import gc
 import psutil
+import tyro
+from dataclasses import dataclass  # 新增
+from typing import Optional  # 新增
 
 # Ray imports for distributed training
 try:
@@ -321,7 +324,7 @@ class Trainer:
         
         self.val_losses.append(avg_loss)
         return avg_loss
-    
+
     def train(self):
         """主训练循环"""
         training_config = self.config.get('training', {})
@@ -332,7 +335,9 @@ class Trainer:
         
         start_time = time.time()
         
-        for epoch in range(epochs):
+        # 修正：从恢复的epoch开始，而不是从0开始
+        start_epoch = self.current_epoch
+        for epoch in range(start_epoch, epochs):
             self.current_epoch = epoch
             
             # 训练
@@ -360,7 +365,7 @@ class Trainer:
                     self._save_checkpoint('best_model')
                     self.logger.info(f"New best model saved with val_loss={val_loss:.4f}")
                 
-                # 每5个epoch保存检查点
+                # 每10个epoch保存检查点
                 if (epoch + 1) % 10 == 0:
                     self._save_checkpoint(f'epoch_{epoch}')
             
@@ -383,7 +388,7 @@ class Trainer:
             self._save_training_history()
         
         return self.best_val_loss
-    
+
     def _save_checkpoint(self, name):
         """保存检查点"""
         if self.local_rank != 0:
@@ -410,22 +415,35 @@ class Trainer:
     
     def _load_checkpoint(self, checkpoint_path):
         """加载检查点"""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        if self.scheduler and checkpoint['scheduler_state_dict']:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        self.current_epoch = checkpoint['epoch']
-        self.current_step = checkpoint['step']
-        self.best_val_loss = checkpoint['best_val_loss']
-        self.train_losses = checkpoint['train_losses']
-        self.val_losses = checkpoint['val_losses']
-        
-        if self.local_rank == 0:
-            self.logger.info(f"Checkpoint loaded from {checkpoint_path}")
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            
+            # 加载模型状态
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # 加载优化器状态
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # 加载调度器状态
+            if self.scheduler and checkpoint.get('scheduler_state_dict'):
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            # 加载训练状态
+            self.current_epoch = checkpoint.get('epoch', 0)
+            self.current_step = checkpoint.get('step', 0)
+            self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            self.train_losses = checkpoint.get('train_losses', [])
+            self.val_losses = checkpoint.get('val_losses', [])
+            
+            if self.local_rank == 0:
+                self.logger.info(f"检查点已加载: {checkpoint_path}")
+                self.logger.info(f"恢复到 Epoch {self.current_epoch}, Step {self.current_step}")
+                self.logger.info(f"最佳验证损失: {self.best_val_loss:.4f}")
+                
+        except Exception as e:
+            if self.local_rank == 0:
+                self.logger.error(f"加载检查点失败: {e}")
+            raise e
     
     def _save_training_history(self):
         """保存训练历史"""
@@ -528,19 +546,69 @@ def create_default_config():
         'resume_from_checkpoint': None
     }
 
+def list_checkpoints(save_dir):
+    """列出可用的检查点"""
+    checkpoint_dir = os.path.join(save_dir, 'models')
+    if not os.path.exists(checkpoint_dir):
+        return []
+    
+    checkpoints = []
+    for file in os.listdir(checkpoint_dir):
+        if file.endswith('.pth'):
+            file_path = os.path.join(checkpoint_dir, file)
+            try:
+                # 尝试加载检查点获取信息
+                checkpoint = torch.load(file_path, map_location='cpu')
+                info = {
+                    'path': file_path,
+                    'filename': file,
+                    'epoch': checkpoint.get('epoch', 'Unknown'),
+                    'step': checkpoint.get('step', 'Unknown'),
+                    'best_val_loss': checkpoint.get('best_val_loss', 'Unknown'),
+                    'modified_time': os.path.getmtime(file_path)
+                }
+                checkpoints.append(info)
+            except:
+                # 如果无法加载，跳过
+                continue
+    
+    # 按修改时间排序
+    checkpoints.sort(key=lambda x: x['modified_time'], reverse=True)
+    return checkpoints
+
+
+@dataclass
+class TrainingArgs:
+    """训练参数配置"""
+    config: str = "default.yaml"
+    """配置文件路径"""
+    
+    create_config: bool = False
+    """创建默认配置文件"""
+    
+    resume: Optional[str] = None
+    """从检查点恢复训练，指定检查点文件路径"""
+    
+    list_checkpoints: bool = False
+    """列出可用的检查点"""
+    
+    resume_best: bool = False
+    """从最佳模型检查点恢复训练"""
+    
+    resume_latest: bool = False
+    """从最新检查点恢复训练"""
+
+
+
 def main():
     """主函数"""
-    import argparse
     
     # 设置环境变量避免TensorFlow相关警告
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     
-    parser = argparse.ArgumentParser(description='BART Time Series Training')
-    parser.add_argument('--config', type=str, default='default.yaml', 
-                       help='配置文件路径')
-    parser.add_argument('--create-config', action='store_true',
-                       help='创建默认配置文件')
-    args = parser.parse_args()
+
+    # 使用tyro解析参数
+    args = tyro.cli(TrainingArgs, description="BART Time Series Training")
     
     # 创建默认配置文件
     if args.create_config:
@@ -560,8 +628,52 @@ def main():
         save_config(config, args.config)
         print(f"默认配置文件已创建: {args.config}")
     
-    # 保存当前使用的配置到输出目录
     save_dir = config.get('save_dir', 'checkpoints')
+    
+    # 列出检查点
+    if args.list_checkpoints:
+        checkpoints = list_checkpoints(save_dir)
+        if checkpoints:
+            print("\n可用的检查点:")
+            print("-" * 80)
+            print(f"{'文件名':<25} {'Epoch':<8} {'Step':<10} {'最佳验证损失':<15} {'修改时间'}")
+            print("-" * 80)
+            for cp in checkpoints:
+                from datetime import datetime
+                mod_time = datetime.fromtimestamp(cp['modified_time']).strftime('%Y-%m-%d %H:%M:%S')
+                print(f"{cp['filename']:<25} {str(cp['epoch']):<8} {str(cp['step']):<10} {str(cp['best_val_loss']):<15} {mod_time}")
+        else:
+            print("没有找到检查点文件")
+        return
+    
+    # 处理resume参数
+    resume_path = None
+    if args.resume:
+        if os.path.exists(args.resume):
+            resume_path = args.resume
+        else:
+            print(f"错误: 检查点文件不存在: {args.resume}")
+            return
+    elif args.resume_best:
+        best_model_path = os.path.join(save_dir, 'models', 'best_model.pth')
+        if os.path.exists(best_model_path):
+            resume_path = best_model_path
+        else:
+            print("错误: 未找到最佳模型检查点")
+            return
+    elif args.resume_latest:
+        checkpoints = list_checkpoints(save_dir)
+        if checkpoints:
+            resume_path = checkpoints[0]['path']  # 最新的检查点
+        else:
+            print("错误: 未找到任何检查点")
+            return
+    
+    if resume_path:
+        config['resume_from_checkpoint'] = resume_path
+        print(f"将从检查点恢复训练: {resume_path}")
+    
+    # 保存当前使用的配置到输出目录
     os.makedirs(save_dir, exist_ok=True)
     save_config(config, os.path.join(save_dir, 'config_used.yaml'))
     
