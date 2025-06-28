@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 import pickle
 
-class CandlestickDataset(Dataset):
+class TimeSeriesDataset(Dataset):
     def __init__(self, data_path, sequence_length=200, prediction_length=5, train=True, train_ratio=0.8):
         """
         Args:
@@ -122,7 +122,7 @@ def create_dataloaders(data_path, batch_size=32, sequence_length=200, prediction
         train_loader, val_loader, dataset_train (用于获取标准化器)
     """
     # 创建训练集
-    dataset_train = CandlestickDataset(
+    dataset_train = TimeSeriesDataset(
         data_path=data_path,
         sequence_length=sequence_length,
         prediction_length=prediction_length,
@@ -131,7 +131,7 @@ def create_dataloaders(data_path, batch_size=32, sequence_length=200, prediction
     )
     
     # 创建验证集
-    dataset_val = CandlestickDataset(
+    dataset_val = TimeSeriesDataset(
         data_path=data_path,
         sequence_length=sequence_length,
         prediction_length=prediction_length,

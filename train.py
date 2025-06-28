@@ -157,7 +157,9 @@ class Trainer:
                 self.model, 
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
-                find_unused_parameters=False
+                find_unused_parameters=True,
+                broadcast_buffers=False       # 可选：禁用buffer广播来提高性能
+
             )
         
         # 如果有预训练模型，加载它
@@ -184,29 +186,26 @@ class Trainer:
         # 减少数据加载器的工作进程数
         num_workers = min(data_config.get('num_workers', 4), 2)
         
-        # 创建数据集
-        from dataloader import TimeSeriesDataset
-        import pandas as pd
+        # 使用dataloader中的create_dataloaders函数
+        from dataloader import create_dataloaders
         
-        # 加载数据
+        # 获取数据路径
         data_path = data_config.get('data_path', 'processed_ETH_USDT_data.feather')
-        data = pd.read_feather(data_path)
         
-        # 创建数据集
-        dataset = TimeSeriesDataset(
-            data=data,
+        # 创建数据加载器（不使用分布式，我们后面会重新包装）
+        train_loader_temp, val_loader_temp, self.dataset = create_dataloaders(
+            data_path=data_path,
+            batch_size=batch_size,
             sequence_length=data_config.get('sequence_length', 200),
-            prediction_length=data_config.get('prediction_length', 5)
+            prediction_length=data_config.get('prediction_length', 5),
+            train_ratio=data_config.get('train_ratio', 0.8),
+            num_workers=0  # 先设为0，后面重新创建
         )
         
-        # 分割训练和验证集
-        train_ratio = data_config.get('train_ratio', 0.8)
-        train_size = int(len(dataset) * train_ratio)
-        val_size = len(dataset) - train_size
-        
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            dataset, [train_size, val_size]
-        )
+        # 获取数据集用于分布式包装
+        # 由于create_dataloaders返回的是包装后的数据集，我们需要获取原始数据集
+        train_dataset = train_loader_temp.dataset
+        val_dataset = val_loader_temp.dataset
         
         # 创建分布式采样器
         if self.is_distributed and not self.use_ray:
@@ -226,7 +225,7 @@ class Trainer:
             train_sampler = None
             val_sampler = None
         
-        # 创建数据加载器
+        # 重新创建数据加载器（带分布式采样器）
         self.train_loader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=batch_size,
@@ -250,8 +249,7 @@ class Trainer:
             self.train_loader = ray_torch.prepare_data_loader(self.train_loader)
             self.val_loader = ray_torch.prepare_data_loader(self.val_loader)
         
-        # 保存数据集和采样器
-        self.dataset = dataset
+        # 保存采样器
         self.train_sampler = train_sampler
         self.val_sampler = val_sampler
         
@@ -292,12 +290,13 @@ class Trainer:
                 mode='min', 
                 factor=0.5, 
                 patience=5,
-                verbose=True
+                verbose=False  # 移除verbose参数
             )
         elif scheduler_type == 'cosine':
             self.scheduler = CosineAnnealingLR(
                 self.optimizer,
-                T_max=self.config.get('training', {}).get('epochs', 100)
+                T_max=self.config.get('training', {}).get('epochs', 100),
+                verbose=False  # 移除verbose参数
             )
         else:
             self.scheduler = None
@@ -457,7 +456,7 @@ class Trainer:
                     self.logger.info(f"New best model saved with val_loss={val_loss:.4f}")
                 
                 # 每10个epoch保存检查点
-                if (epoch + 1) % 10 == 0:
+                if (epoch + 1) % 5 == 0:
                     self._save_checkpoint(f'epoch_{epoch}')
             
             # Ray Train报告进度
@@ -509,8 +508,20 @@ class Trainer:
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
             
+            # 处理DDP模型的状态字典
+            model_state_dict = checkpoint['model_state_dict']
+            
+            # 如果当前模型是DDP包装的，但检查点不是，需要添加module前缀
+            if isinstance(self.model, DDP):
+                if not any(key.startswith('module.') for key in model_state_dict.keys()):
+                    model_state_dict = {f'module.{k}': v for k, v in model_state_dict.items()}
+            else:
+                # 如果当前模型不是DDP，但检查点是，需要移除module前缀
+                if any(key.startswith('module.') for key in model_state_dict.keys()):
+                    model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
+            
             # 加载模型状态
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.model.load_state_dict(model_state_dict)
             
             # 加载优化器状态
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -520,7 +531,7 @@ class Trainer:
                 self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             
             # 加载训练状态
-            self.current_epoch = checkpoint.get('epoch', 0)
+            self.current_epoch = checkpoint.get('epoch', 0) + 1  # 从下一个epoch开始
             self.current_step = checkpoint.get('step', 0)
             self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             self.train_losses = checkpoint.get('train_losses', [])
@@ -528,35 +539,43 @@ class Trainer:
             
             if self.local_rank == 0:
                 self.logger.info(f"检查点已加载: {checkpoint_path}")
-                self.logger.info(f"恢复到 Epoch {self.current_epoch}, Step {self.current_step}")
-                self.logger.info(f"最佳验证损失: {self.best_val_loss:.4f}")
+                self.logger.info(f"将从 Epoch {self.current_epoch} 开始训练")
+                self.logger.info(f"当前最佳验证损失: {self.best_val_loss:.4f}")
                 
         except Exception as e:
             if self.local_rank == 0:
                 self.logger.error(f"加载检查点失败: {e}")
             raise e
     
-    def _save_training_history(self):
-        """保存训练历史"""
-        history = {
+    def _save_checkpoint(self, name):
+        """保存检查点"""
+        if self.local_rank != 0:
+            return
+        
+        # 获取模型状态字典，处理DDP包装
+        if isinstance(self.model, DDP):
+            model_state_dict = self.model.module.state_dict()
+        else:
+            model_state_dict = self.model.state_dict()
+            
+        checkpoint = {
+            'epoch': self.current_epoch,
+            'step': self.current_step,
+            'model_state_dict': model_state_dict,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'best_val_loss': self.best_val_loss,
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'best_val_loss': self.best_val_loss,
-            'total_epochs': self.current_epoch,
-            'total_steps': self.current_step
+            'config': self.config
         }
         
-        # 保存为JSON和YAML格式
-        history_json_path = os.path.join(self.save_dir, 'training_history.json')
-        with open(history_json_path, 'w') as f:
-            json.dump(history, f, indent=2)
+        checkpoint_path = os.path.join(self.save_dir, 'models', f'{name}.pth')
+        torch.save(checkpoint, checkpoint_path)
         
-        history_yaml_path = os.path.join(self.save_dir, 'training_history.yaml')
-        with open(history_yaml_path, 'w') as f:
-            yaml.dump(history, f, default_flow_style=False, indent=2)
-        
-        # 绘制损失曲线
-        self._plot_losses()
+        # Ray Train检查点
+        if self.use_ray:
+            train.save_checkpoint(Checkpoint.from_dict(checkpoint))
     
     def _plot_losses(self):
         """绘制损失曲线"""
