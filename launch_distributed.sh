@@ -2,7 +2,7 @@
 # filepath: /home/hw3579/bart/launch_distributed.sh
 
 # 设置可见的GPU
-export CUDA_VISIBLE_DEVICES=2,3
+export CUDA_VISIBLE_DEVICES=0
 
 # 检查GPU数量
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)

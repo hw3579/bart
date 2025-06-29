@@ -680,7 +680,6 @@ def create_default_config():
             'num_decoder_layers': 6,
             'nhead': 8,
             'dropout': 0.1,
-            'use_flash_attention': False  # 默认不使用Flash Attention
         },
         'optimizer': {
             'lr': 0.0001,

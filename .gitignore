@@ -6,5 +6,5 @@
 #log pkl
 *.log
 *.pkl
-
+*.feather
 /data
