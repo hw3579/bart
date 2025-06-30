@@ -20,7 +20,8 @@ model:
   num_encoder_layers: 6
   prediction_length: 10
   sequence_length: 150
-  use_flash_attention: false          # 新增：启用Flash Attention
+  use_flash_attention: false          # 等待修补
+  use_xformers: false                 # 等待修补
   feature_columns: ['open', 'high', 'low', 'close', 'volume', 'delta']  # 新增：特征列
 
 optimizer:
@@ -30,7 +31,7 @@ optimizer:
   weight_decay: 0.01
 
 training:
-  epochs: 1
+  epochs: 50
   mixed_precision: true
 
 resume_from_checkpoint: null
