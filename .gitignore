@@ -2,6 +2,7 @@
 /checkpoints
 /checkpoints_2gpu
 *.pyc
+.yaml
 
 #log pkl
 *.log

@@ -2,44 +2,39 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
-df = pd.read_feather("data/ETH_USDT_USDT-1m-futures.feather")
+df = pd.read_feather("ETH_USDT_5m_20240101_20250630.feather")
 
 # print(df.head())
 
 # 数据预处理
 def preprocess_data(df):
+    """向量化版本的数据预处理"""
     # 创建新的数据结构
     processed_df = pd.DataFrame()
     
-    # open 保持不变
+    # 基础特征保持不变
     processed_df['open'] = df['open']
-    
-    # 保留 high 和 low
     processed_df['high'] = df['high']
     processed_df['low'] = df['low']
-    
-    # close 保持不变
     processed_df['close'] = df['close']
-    
-    # volume 保持不变
     processed_df['volume'] = df['volume']
-
-    # delta = high - low
-    processed_df['delta'] = (df['high'] - df['low'])/ df['open'] * 100 # 计算波动率，单位为百分比
+    processed_df['delta'] = (df['high'] - df['low']) / df['open'] * 100
     
-    # 计算label：后面5根蜡烛的平均值除以当前蜡烛乘100
-    # 使用close价格计算
+    # 向量化计算label - 这是关键优化！
+    close_prices = df['close'].values
+    
+    # 使用numpy的向量化操作计算下一个价格的变化率
+    current_close = close_prices[:-1]  # 除了最后一个
+    next_close = close_prices[1:]      # 除了第一个
+    
+    # 计算涨跌幅度
+    label_values = ((next_close - current_close) / current_close) * 100
+    
+    # 设置label列
     processed_df['label'] = np.nan
+    processed_df.iloc[:-1, processed_df.columns.get_loc('label')] = label_values
     
-    for i in tqdm(range(len(df) - 1), desc="Processing labels"):
-        # 计算当前蜡烛对于往前第1个的变化
-        five_close = df['close'].iloc[i+1]
-        current_close = df['close'].iloc[i]
-        
-        # 计算涨跌幅度 (未来5根平均价格 / 当前价格) * 100
-        processed_df.loc[i, 'label'] = ((five_close - current_close) / current_close) * 100
-
-    # 移除最后5行（因为没有足够的未来数据计算label）
+    # 移除最后一行（没有未来数据）
     processed_df = processed_df.dropna()
     
     return processed_df
@@ -57,6 +52,6 @@ print("\n数据统计信息:")
 print(processed_data.describe())
 
 # 保存预处理后的数据
-processed_data.to_feather("OHLCVD_ETH_USDT_data.feather")
+processed_data.to_feather("OHLCVD_ETH_USDT_5m_20240101_20250630.feather")
 print("\n预处理后的数据已保存到: OHLCVD_ETH_USDT_data.feather")
 

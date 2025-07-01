@@ -1,7 +1,7 @@
 data:
   batch_size: 128
-  data_path: OHLCVD_ETH_USDT_data_1m.feather
-  num_workers: 4
+  data_path: OHLCVD_ETH_USDT_5m_20240101_20250630.feather
+  num_workers: 0
   prediction_length: 10
   sequence_length: 150
   train_ratio: 0.8
@@ -31,7 +31,7 @@ optimizer:
   weight_decay: 0.01
 
 training:
-  epochs: 50
+  epochs: 30000
   mixed_precision: true
 
 resume_from_checkpoint: null
